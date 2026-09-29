@@ -12,7 +12,7 @@ local function Reply(source, message, notifyType)
     if source == 0 then
         print('[loe_exp] ' .. message)
     else
-        LoeQbox.Notify(source, message, notifyType or 'inform')
+        LoeQbox.Notify(source, message, notifyType or 'info')
     end
 end
 
@@ -152,23 +152,31 @@ for _, definition in ipairs(AMOUNT_COMMANDS) do
                 return
             end
 
+            -- Sınıra (0 veya maksimum EXP) takılan işlemde istenen değil, gerçekte uygulanan miktar gösterilir
+            local delta = session.totalExp - oldExp
+            local applied = math.abs(delta)
+            local capped = definition.action ~= 'set' and applied ~= amount
+            local note = capped and L.admin_capped:format(amount, applied) or ''
+
             if definition.action == 'set' then
                 Reply(source, L.admin_set:format(targetId, session.name, session.totalExp, oldLevel, session.level), 'success')
             else
                 Reply(source, L['admin_' .. definition.action]:format(
-                    targetId, session.name, amount, oldLevel, session.level, session.totalExp
-                ), 'success')
+                    targetId, session.name, applied, oldLevel, session.level, session.totalExp
+                ) .. note, 'success')
             end
 
+            -- amount: gerçekte değişen miktar (işaretli; + ekleme, - çıkarma)
             LoeExpLog.Write({
                 action = definition.action,
                 actorSource = source,
                 session = session,
-                amount = amount,
+                amount = delta,
                 oldLevel = oldLevel,
                 newLevel = session.level,
                 oldExp = oldExp,
                 newExp = session.totalExp,
+                note = capped and ('istenen: %d'):format(amount) or nil,
             })
         end)
     end

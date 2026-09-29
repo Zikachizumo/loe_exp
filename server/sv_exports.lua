@@ -11,7 +11,7 @@
         exports.loe_exp:SetExp(source, totalExp, reason?)    -> ok, levelOrError, totalExp
         exports.loe_exp:RecalculateLevel(source)             -> ok, levelOrError, totalExp
         exports.loe_exp:IsPlayerAfk(source)                  -> boolean|nil
-        exports.loe_exp:GetRequiredXP(level)                 -> number
+        exports.loe_exp:GetRequiredXP(level)                 -> number|nil
         exports.loe_exp:GetTotalExpForLevel(level)           -> number
         exports.loe_exp:GetMaxLevel()                        -> number
 
@@ -26,14 +26,16 @@
     YAYINLANAN OLAYLAR (AddEventHandler ile dinleyin, RegisterNetEvent KULLANMAYIN):
         'loe_exp:onPlayerLoaded'  (source, data)
         'loe_exp:onExpChanged'    (source, totalExp, delta, reason)
-        'loe_exp:onLevelChanged'  (source, newLevel, oldLevel)
+        'loe_exp:onLevelChanged'  (source, newLevel, oldLevel)   -- değişim başına bir kez
+        'loe_exp:onLevelReached'  (source, level)                -- ulaşılan HER seviye için ayrı
 
     GÜVENLİK: Buradaki olaylar RegisterNetEvent ile kaydedilmediği için istemciler tarafından
     tetiklenemez. FiveM, ağdan gelen ve net olarak işaretlenmemiş olayları reddeder.
 ]]
 
 --- Export / event ile yapılan değişikliği (ayar açıksa) loglar.
-local function LogExternalChange(action, source, amount, before, reason)
+--- amount: gerçekte değişen miktar (işaretli).
+local function LogExternalChange(action, source, before, reason)
     if not Config.Logging.ExportChanges then
         return
     end
@@ -45,7 +47,7 @@ local function LogExternalChange(action, source, amount, before, reason)
         action = 'export_' .. action,
         invoker = GetInvokingResource() or GetCurrentResourceName(),
         session = session,
-        amount = amount,
+        amount = session.totalExp - before.totalExp,
         oldLevel = before.level,
         newLevel = session.level,
         oldExp = before.totalExp,
@@ -61,7 +63,7 @@ local function WithLogging(action, fn)
         local before = session and { level = session.level, totalExp = session.totalExp } or nil
         local ok, levelOrError, totalExp = fn(source, amount, reason)
         if ok and before then
-            LogExternalChange(action, source, LoeLevel.ToInteger(amount) or 0, before, reason)
+            LogExternalChange(action, source, before, reason)
         end
         return ok, levelOrError, totalExp
     end
@@ -97,7 +99,14 @@ exports('RemoveExp', RemoveExp)
 exports('SetExp', SetExp)
 exports('RecalculateLevel', LoeExp.RecalculateLevel)
 exports('IsPlayerAfk', LoeExp.IsPlayerAfk)
-exports('GetRequiredXP', LoeLevel.GetRequiredXP)
+-- Geçersiz seviyede hata fırlatmak yerine nil döner
+exports('GetRequiredXP', function(level)
+    local value = LoeLevel.ToInteger(level)
+    if not value or value < 1 then
+        return nil
+    end
+    return LoeLevel.GetRequiredXP(value)
+end)
 exports('GetTotalExpForLevel', LoeLevel.GetTotalExpForLevel)
 exports('GetMaxLevel', function()
     return LoeLevel.MaxLevel

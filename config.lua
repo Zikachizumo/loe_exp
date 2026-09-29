@@ -21,6 +21,10 @@ Config.ExpIntervalMinutes = 60   -- EXP verme süresi: kaç AKTİF dakikada bir 
 Config.AutoSaveMinutes  = 5
 Config.AutoCreateTables = true   -- tablolar yoksa açılışta sql/loe_exp.sql çalıştırılır
 
+-- Veritabanı çağrısı zaman aşımı (sn). oxmysql veritabanına bağlanamadığında çağrıya hiç
+-- cevap vermez; bu süre dolunca kayıt başarısız sayılır ve sonraki otomatik kayıtta tekrar denenir.
+Config.DatabaseTimeout  = 30
+
 -- ------------------------------------------------------------------ qbox metadata
 -- Seviye ve toplam EXP ayrıca oyuncu metadata'sına yazılır. Böylece HUD gibi scriptler
 -- qbx:GetPlayerData().metadata.level ile ek kod yazmadan okuyabilir.
@@ -45,6 +49,12 @@ Config.Afk = {
     CameraThreshold = 1.0,   -- derece: kamera bu kadar döndüyse aktivite
     MoveThreshold   = 0.3,   -- metre: karakter bu kadar yer değiştirdiyse aktivite (araç yolcusu hariç)
     CountVoice      = true,  -- sesli konuşma aktivite sayılsın mı
+    CountNuiCursor  = true,  -- telefon / envanter gibi ekranlarda imleç hareketi aktivite sayılsın mı
+
+    -- Araç yolcusunda kamera hareketi aktivite sayılsın mı? Araç dönerken takip kamerası da
+    -- kendiliğinden döndüğü için AFK yolcu aktif görünebilir; bu yüzden varsayılan kapalıdır.
+    -- Yolcunun konuşması, tuşları ve imleci yine sayılır.
+    PassengerCamera = false,
 
     -- Sunucu taraflı doğrulama (OneSync). İstemci "aktifim" dese bile karakter
     -- StillMinutes boyunca hiç yer / yön değiştirmediyse sunucu oyuncuyu AFK sayar.
@@ -61,7 +71,7 @@ Config.Notify = {
     Enabled   = true,         -- otomatik bildirimler (komut yanıtları etkilenmez)
     Title     = 'Seviye',
     Duration  = 7000,         -- ms
-    Position  = 'top-right',  -- ox_lib bildirim konumu
+    Position  = nil,          -- nil: oyuncunun ox_lib ayarındaki konum; ör. 'top-right' ile sabitlenir
 
     LevelUp   = true,         -- "Tebrikler! 25. seviyeye ulaştın."
     LevelDown = true,         -- EXP çıkarılınca seviye düşüşü
@@ -109,6 +119,7 @@ Config.Locale = {
     admin_remove = '[%d] %s oyuncusundan %d EXP çıkarıldı. Seviye: %d -> %d (Toplam: %d EXP)',
     admin_set    = '[%d] %s oyuncusunun toplam EXP miktarı %d olarak ayarlandı. Seviye: %d -> %d',
     admin_failed = 'İşlem uygulanamadı: %s',
+    admin_capped = ' (istenen: %d EXP, sınır nedeniyle %d EXP uygulandı)',
 
     yes = 'Evet',
     no  = 'Hayır',

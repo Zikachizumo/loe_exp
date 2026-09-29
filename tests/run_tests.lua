@@ -11,6 +11,7 @@
 local realPrint = print
 package.path = './tests/?.lua;' .. package.path
 local Mock = require('mock_fivem')
+local MockClient = require('mock_client')
 
 local tests = {}
 local function test(name, fn)
@@ -599,9 +600,324 @@ end)
 test('Yetkili komutları group.admin ile kısıtlı, /seviyem herkese açık', function()
     local env = Setup()
     for _, name in ipairs({ 'seviyebak', 'expekle', 'expsil', 'expayarla' }) do
-        eq(env.commands[name].properties.restricted, 'group.admin', name)
+        eq(env.commands[name].restricted, 'group.admin', name)
     end
-    eq(env.commands['seviyem'].properties.restricted, nil)
+    eq(env.commands['seviyem'].restricted, nil)
+end)
+
+------------------------------------------------------------------------
+-- Test raporundaki sorunların regresyon testleri
+------------------------------------------------------------------------
+test('Veritabanı yanıt vermezse kayıt kilitlenmez; bağlantı dönünce veri yazılır', function()
+    local env = Setup()
+    env:AddPlayer(2)
+    env:Heartbeat(2, 0)
+    env:PlayActive(1, 60)
+
+    env.dbHang = true -- oxmysql bağlantı kuramıyor: await hiç dönmez
+    for _ = 1, 12 do -- 6 dk: otomatik kayıt asılı veritabanına denk gelir
+        env:Advance(30)
+        env:Move(1)
+        env:Heartbeat(1, 0)
+    end
+    eq(LoeExp.GetSession(1).saving, false, 'zaman aşımından sonra kayıt kilidi açılmalı')
+    truthy(ContainsPattern(env.logs, 'zaman aşımına uğradı'), 'zaman aşımı loglanmalı')
+
+    env:Drop(2) -- kesinti sırasında çıkan oyuncu
+    env:AddPlayer(3) -- kesinti sırasında giren oyuncu: yükleme zaman aşımına uğrar
+    env:Advance(31)
+    eq(LoeExp.GetSession(3), nil)
+
+    env.dbHang = false
+    for _ = 1, 20 do -- 10 dk
+        env:Advance(30)
+        env:Move(1)
+        env:Heartbeat(1, 0)
+    end
+    local saved = env.db.players['CID1'].active_seconds
+    truthy(saved >= 12 * 60, 'kesinti sonrası kaydedilen aktif süre: ' .. saved)
+    eq(LoeExp.Pending['CID2'], nil, 'kesintide çıkan oyuncunun kaydı sonradan yazılmalı')
+
+    env:ClientEvent(3, 'loe_exp:server:requestSync')
+    env:Advance(1)
+    truthy(LoeExp.GetSession(3), 'veritabanı dönünce yükleme yeniden denenmeli')
+end)
+
+test('Uzun karakter adı kırpılır, diğer oyuncuların toplu kaydını bozmaz', function()
+    local env = Setup()
+    env:AddPlayer(2, { firstname = string.rep('Ş', 120) })
+    env:Heartbeat(2, 0)
+    for _ = 1, 12 do
+        env:Advance(30)
+        for src = 1, 2 do
+            env:Move(src)
+            env:Heartbeat(src, 0)
+        end
+    end
+    truthy(env.db.players['CID1'].active_seconds > 0, 'oyuncu 1 kaydedilmeli')
+    truthy(env.db.players['CID2'].active_seconds > 0, 'uzun isimli oyuncu da kaydedilmeli')
+    eq(utf8.len(env.db.players['CID2'].last_name), 100, 'isim sütun uzunluğuna kırpılmalı')
+end)
+
+test('Toplu kayıt reddedilirse oyuncular tek tek kaydedilir, bozuk satır diğerlerini engellemez', function()
+    local env = Setup()
+    env:AddPlayer(2)
+    env:AddPlayer(3)
+    env:Heartbeat(2, 0)
+    env:Heartbeat(3, 0)
+    env.failIdentifiers['CID2'] = true
+    local function Play(steps)
+        for _ = 1, steps do
+            env:Advance(30)
+            for src = 1, 3 do
+                env:Move(src)
+                env:Heartbeat(src, 0)
+            end
+        end
+    end
+    Play(12)
+    truthy(env.db.players['CID1'].active_seconds > 0, 'oyuncu 1 kaydedilmeli')
+    truthy(env.db.players['CID3'].active_seconds > 0, 'oyuncu 3 kaydedilmeli')
+    eq(env.db.players['CID2'].active_seconds, 0, 'reddedilen satır yazılmaz')
+    eq(LoeExp.GetSession(2).dirty, true, 'reddedilen oyuncu sonraki kayıtta tekrar denenir')
+
+    env.failIdentifiers['CID2'] = nil
+    Play(10)
+    truthy(env.db.players['CID2'].active_seconds > 0, 'sorun giderilince kaydedilmeli')
+end)
+
+test('Uzun not (reason) kırpılır, log kaybolmaz', function()
+    local env = Setup({ configure = function(c) c.Logging.ExportChanges = true end })
+    env.invoker = 'loe_jobs'
+    env:Export('AddExp', 1, 1, string.rep('ğ', 300))
+    local log = env.db.logs[#env.db.logs]
+    truthy(log, 'log yazılmalı')
+    eq(utf8.len(log.note), 255)
+    eq(env.lostQueries, 0)
+end)
+
+test('Config.MaxLevel düşürülse de EXP ve süre silinmez, ayar geri alınınca seviye geri gelir', function()
+    local db = Mock.NewDatabase()
+    db.players['CID1'] = {
+        identifier = 'CID1', level = 80, total_exp = 5562, active_seconds = 1800,
+        total_active_seconds = 0, last_name = '',
+    }
+    local env = Mock.new({ db = db, configure = function(c) c.MaxLevel = 50 end })
+    env:Boot()
+    env:AddPlayer(1)
+    env:Heartbeat(1, 0)
+    eq(env:Export('GetLevel', 1), 50, 'maksimum seviyede görünür')
+    eq(db.players['CID1'].total_exp, 5562, 'toplam EXP veritabanında korunur')
+
+    env:PlayActive(1, 3600)
+    eq(env:Export('GetTotalExp', 1), 5562, 'maksimum seviyede EXP kazanmaz')
+    local _, err = env:Export('AddExp', 1, 5)
+    eq(err, 'max_level')
+    env:Export('RemoveExp', 1, 2)
+    eq(env:Export('GetTotalExp', 1), 5560, 'çıkarma fazlayı silmez, yalnızca istenen kadar azaltır')
+    env:Drop(1)
+
+    local env2 = Mock.new({ db = db })
+    env2:Boot()
+    env2:AddPlayer(1)
+    eq(env2:Export('GetLevel', 1), 79, 'MaxLevel 100 olunca gerçek seviye')
+    eq(LoeExp.GetSession(1).activeSeconds, 1800, 'biriken aktif süre de korunur')
+end)
+
+test('Sınıra takılan yetkili işleminde gerçek miktar gösterilir ve loglanır', function()
+    local env = Setup()
+    env:AddPlayer(2, { groups = { ['group.admin'] = true } })
+    env:Export('SetExp', 1, 8750)
+
+    env:Command(2, 'expekle', { '1', '500' })
+    local notes = env:Notifications(2)
+    eq(notes[#notes], '[1] Oyuncu1 Test oyuncusuna 10 EXP eklendi. Seviye: 99 -> 100 (Toplam: 8760 EXP) (istenen: 500 EXP, sınır nedeniyle 10 EXP uygulandı)')
+    local log = env.db.logs[#env.db.logs]
+    eq(log.amount, 10)
+    eq(log.note, 'istenen: 500')
+
+    env:Command(2, 'expsil', { '1', '8000' })
+    log = env.db.logs[#env.db.logs]
+    eq(log.amount, -8000, 'çıkarma işaretli loglanır')
+    eq(log.note, '')
+
+    env:Command(2, 'expsil', { '1', '8000' }) -- 760 EXP kaldı
+    notes = env:Notifications(2)
+    truthy(notes[#notes]:find('oyuncusundan 760 EXP çıkarıldı', 1, true), notes[#notes])
+    eq(env.db.logs[#env.db.logs].amount, -760)
+end)
+
+test('Her ulaşılan seviye için onLevelReached ayrı tetiklenir', function()
+    local env = Setup()
+    local reached = {}
+    AddEventHandler('loe_exp:onLevelReached', function(src, level)
+        reached[#reached + 1] = src .. ':' .. level
+    end)
+    env:Export('AddExp', 1, 65)
+    eq(table.concat(reached, ','), '1:2,1:3,1:4,1:5,1:6,1:7,1:8,1:9,1:10')
+    env:Export('RemoveExp', 1, 10)
+    eq(#reached, 9, 'seviye düşüşünde tetiklenmez')
+    env:Export('AddExp', 1, 10)
+    eq(reached[#reached], '1:10', 'yeniden ulaşılınca tekrar tetiklenir')
+end)
+
+test('GetRequiredXP export geçersiz girdide hata fırlatmaz', function()
+    local env = Setup()
+    for _, bad in ipairs({ 'nil', 'abc', 0, -3, 1.5 }) do
+        eq(env:Export('GetRequiredXP', bad ~= 'nil' and bad or nil), nil, tostring(bad))
+    end
+    eq(env:Export('GetRequiredXP', 99), 177)
+    eq(env:Export('GetRequiredXP', '9'), 14)
+end)
+
+test('ox_lib bildirimi güncel tip adıyla gider, konum oyuncu ayarına bırakılır', function()
+    local env = Setup()
+    env:PlayActive(1, 3600)
+    env:Command(1, 'seviyem', {})
+    local events = env:ClientEventsFor(1, 'ox_lib:notify')
+    truthy(#events >= 2)
+    local valid = { success = true, error = true, info = true, warning = true }
+    for _, event in ipairs(events) do
+        truthy(valid[event.args[1].type], 'geçersiz tip: ' .. tostring(event.args[1].type))
+        eq(event.args[1].position, nil)
+    end
+end)
+
+test('Qbox oyuncu nesnesi az kopyalanır, metadata yalnızca değişince yazılır', function()
+    local env = Mock.new()
+    env:Boot()
+    local before = env.getPlayerCalls
+    env:AddPlayer(1)
+    truthy(env.getPlayerCalls - before <= 2, 'girişte GetPlayer çağrısı: ' .. (env.getPlayerCalls - before))
+
+    local calls = env.getPlayerCalls
+    env:Heartbeat(1, 0)
+    env:PlayActive(1, 3600)
+    eq(env.getPlayerCalls, calls, 'EXP kazanımında oyuncu nesnesi kopyalanmaz')
+    eq(env.players[1].metadata.exp, 1)
+
+    -- Metadata zaten güncelse yeniden girişte yazılmaz
+    env:Logout(1)
+    local writes = env.players[1].metaWrites
+    env:Login(1, { metadata = { level = 2, exp = 1 } })
+    eq(env.players[1].metaWrites, writes)
+end)
+
+------------------------------------------------------------------------
+-- İstemci (client/cl_main.lua)
+------------------------------------------------------------------------
+local vec = MockClient.vec
+
+test('İstemci: karakter seçilmeden veri istemez, girişte 10 sn aralıkla ister', function()
+    local client = MockClient.new()
+    client:Advance(30000)
+    eq(#client:Events('loe_exp:server:requestSync'), 0)
+    LocalPlayer.state.isLoggedIn = true
+    client:Advance(25000)
+    local count = #client:Events('loe_exp:server:requestSync')
+    truthy(count >= 2 and count <= 3, count .. ' istek')
+end)
+
+test('İstemci: ilk bildirim hemen, sonra 30 sn aralıkla gider; karakterden çıkınca durur', function()
+    local client = MockClient.new()
+    client:Sync()
+    local beats = client:Events('loe_exp:server:activity')
+    eq(#beats, 1)
+    eq(beats[1].args[1], 0)
+    client:Advance(95000)
+    beats = client:Events('loe_exp:server:activity')
+    for i = 2, #beats do
+        local gap = beats[i].at - beats[i - 1].at
+        truthy(gap >= 30000 and gap <= 31000, 'aralık ' .. gap)
+    end
+    client:Unload()
+    local count = #client:Events('loe_exp:server:activity')
+    client:Advance(60000)
+    eq(#client:Events('loe_exp:server:activity'), count)
+end)
+
+test('İstemci: yeniden girişte ikinci bildirim sunucu hız sınırına takılmaz', function()
+    local client = MockClient.new()
+    client:Sync()
+    client:Advance(25000)
+    client:Unload()
+    client:Sync()
+    local first = #client:Events('loe_exp:server:activity')
+    client:Advance(40000)
+    local beats = client:Events('loe_exp:server:activity')
+    truthy(beats[first + 1].at - beats[first].at >= 30000, 'yeniden girişten sonraki aralık')
+end)
+
+test('İstemci: kamera, yürüme, konuşma ve tuş aktivite sayılır; hareketsizlikte boşta süre artar', function()
+    local client = MockClient.new()
+    client:Sync()
+    client:Advance(90000)
+    truthy(client:LastIdle() >= 55, 'boşta süre artmalı: ' .. client:LastIdle())
+
+    client.state.cam = vec(0, 0, 25)
+    client:Advance(30000)
+    truthy(client:LastIdle() <= 30, 'kamera: ' .. client:LastIdle())
+
+    client:Advance(60000)
+    client.state.talking = true
+    client:Advance(30000)
+    client.state.talking = false
+    truthy(client:LastIdle() <= 1, 'konuşma: ' .. client:LastIdle())
+
+    client:Advance(60000)
+    client.state.coords = vec(3, 0, 0)
+    client:Advance(30000)
+    truthy(client:LastIdle() <= 30, 'yürüme: ' .. client:LastIdle())
+
+    client:Advance(60000)
+    client.state.pressed[38] = true -- E
+    client:Advance(30000)
+    client.state.pressed[38] = nil
+    truthy(client:LastIdle() <= 1, 'tuş: ' .. client:LastIdle())
+end)
+
+test('İstemci: GTA boşta kamerası dönerken aktivite sayılmaz', function()
+    local client = MockClient.new()
+    client:Sync()
+    client.state.idleCam = true
+    client:Simulate(90, function(i) client.state.cam = vec(0, 0, i * 4) end)
+    truthy(client:LastIdle() >= 55, 'idle=' .. client:LastIdle())
+end)
+
+test('İstemci: AFK araç yolcusu dönen takip kamerasıyla aktif sayılmaz; sürücü sayılır', function()
+    local function Ride(seat, configure)
+        local client = MockClient.new({ configure = configure })
+        client:Sync()
+        cache.vehicle, cache.seat = 5, seat
+        client:Simulate(180, function(i)
+            client.state.coords = vec(i * 10, 0, 0)
+            client.state.cam = vec(0, 0, (i * 3) % 360) -- kamera aracın yönüyle döner
+        end)
+        cache.vehicle, cache.seat = false, false
+        return client:LastIdle()
+    end
+    truthy(Ride(0) >= 150, 'AFK yolcu boşta sayılmalı')
+    truthy(Ride(-1) <= 1, 'sürücü aktif sayılmalı')
+    truthy(Ride(0, function(c) c.Afk.PassengerCamera = true end) <= 1, 'PassengerCamera açıkken yolcu kamerası sayılır')
+end)
+
+test('İstemci: telefon / envanter ekranında imleç hareketi aktivite sayılır', function()
+    local client = MockClient.new()
+    client:Sync()
+    client.state.nuiFocus = true
+    client:Simulate(12 * 60, function(i)
+        if i % 20 == 0 then client.state.cursor = { 500 + i, 400 } end
+    end)
+    truthy(client:LastIdle() <= 30, 'imleç hareketi sayılmalı: ' .. client:LastIdle())
+
+    client:Advance(12 * 60000) -- ekran açık ama imleç hareketsiz
+    truthy(client:LastIdle() >= 600, 'hareketsiz imleç sayılmamalı: ' .. client:LastIdle())
+
+    local off = MockClient.new({ configure = function(c) c.Afk.CountNuiCursor = false end })
+    off:Sync()
+    off.state.nuiFocus = true
+    off:Simulate(120, function(i) off.state.cursor = { i, i } end)
+    truthy(off:LastIdle() >= 55, 'ayar kapalıyken sayılmaz')
 end)
 
 test('fxmanifest.lua içindeki tüm dosyalar mevcut', function()

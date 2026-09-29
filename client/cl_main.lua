@@ -4,8 +4,9 @@
     "son aktiviteden bu yana geçen saniye" bilgisini göndermektir.
     İstemci EXP, seviye veya süre BELİRLEYEMEZ; karar sunucudadır.
 
-    Aktivite sayılanlar: kamera hareketi, karakterin yer değiştirmesi (araç yolcusu hariç),
-    sesli konuşma ve temel kontrol tuşları.
+    Aktivite sayılanlar: kamera hareketi (araç yolcusu hariç), karakterin yer değiştirmesi
+    (araç yolcusu hariç), sesli konuşma, telefon / envanter gibi ekranlarda imleç hareketi
+    ve temel kontrol tuşları.
     FPS dostu: her karede değil, SampleIntervalMs aralığıyla tek bir döngüde kontrol edilir.
 ]]
 
@@ -15,6 +16,8 @@ local SYNC_RETRY_MS    = 10000
 local TRACK_ACTIVITY   = Config.Afk.Enabled == true
 local CAMERA_THRESHOLD = tonumber(Config.Afk.CameraThreshold) or 1.0
 local MOVE_THRESHOLD   = tonumber(Config.Afk.MoveThreshold) or 0.3
+local COUNT_NUI_CURSOR = Config.Afk.CountNuiCursor ~= false
+local PASSENGER_CAMERA = Config.Afk.PassengerCamera == true
 
 -- Aktivite sayılan kontroller: koşma, zıplama, araca binme, ateş, nişan, ileri/geri/sağ/sol,
 -- etkileşim (E), siper, araç direksiyonu / gaz / fren, sohbet (T), bas-konuş (N)
@@ -24,6 +27,8 @@ local isLoaded = false
 local playerData = nil
 local lastActivity = GetGameTimer()
 local lastCamRot, lastCoords = nil, nil
+local lastCursorX, lastCursorY = nil, nil
+local sinceHeartbeat = 0
 
 local function MarkActive()
     lastActivity = GetGameTimer()
@@ -37,11 +42,13 @@ end
 -- ------------------------------------------------------------------ aktivite örneği
 local function SampleActivity()
     local ped = cache.ped
+    local isPassenger = cache.vehicle and cache.seat ~= -1
 
-    -- Kamera: GTA'nın otomatik boşta kamerası dönerken kamera hareketi aktivite sayılmaz
+    -- Kamera: GTA'nın otomatik boşta kamerası dönerken kamera hareketi aktivite sayılmaz.
+    -- Araç yolcusunda da sayılmaz (PassengerCamera): araç dönerken takip kamerası kendiliğinden döner.
     local idleCam = IsCinematicIdleCamRendering and IsCinematicIdleCamRendering()
     local camRot = GetGameplayCamRot(2)
-    if lastCamRot and not idleCam then
+    if lastCamRot and not idleCam and (PASSENGER_CAMERA or not isPassenger) then
         if AngleDiff(camRot.x, lastCamRot.x) >= CAMERA_THRESHOLD or AngleDiff(camRot.z, lastCamRot.z) >= CAMERA_THRESHOLD then
             MarkActive()
         end
@@ -50,11 +57,21 @@ local function SampleActivity()
 
     -- Konum: araçta yalnızca sürücünün hareketi sayılır (AFK yolcu sayılmaz)
     local coords = GetEntityCoords(ped)
-    local canMove = not cache.vehicle or cache.seat == -1
-    if lastCoords and canMove and #(coords - lastCoords) >= MOVE_THRESHOLD then
+    if lastCoords and not isPassenger and #(coords - lastCoords) >= MOVE_THRESHOLD then
         MarkActive()
     end
     lastCoords = coords
+
+    -- Telefon / envanter gibi NUI ekranları: kamera ve karakter sabittir, imleç hareketi aktivitedir
+    if COUNT_NUI_CURSOR and IsNuiFocused() then
+        local x, y = GetNuiCursorPosition()
+        if lastCursorX and (x ~= lastCursorX or y ~= lastCursorY) then
+            MarkActive()
+        end
+        lastCursorX, lastCursorY = x, y
+    else
+        lastCursorX, lastCursorY = nil, nil
+    end
 
     -- Sesli konuşma
     if Config.Afk.CountVoice and NetworkIsPlayerTalking(cache.playerId) then
@@ -82,7 +99,6 @@ end
 
 -- ------------------------------------------------------------------ ana döngü
 CreateThread(function()
-    local sinceHeartbeat = 0
     local sinceSyncRequest = SYNC_RETRY_MS
 
     while true do
@@ -121,8 +137,11 @@ RegisterNetEvent('loe_exp:client:sync', function(data)
     if not isLoaded then
         isLoaded = true
         lastCamRot, lastCoords = nil, nil
+        lastCursorX, lastCursorY = nil, nil
         MarkActive()
-        -- İlk bildirim sunucuda referans noktası oluşturur
+        -- İlk bildirim sunucuda referans noktası oluşturur; sayaç sıfırlanır ki
+        -- bir sonraki bildirim sunucunun hız sınırına takılmadan tam aralıkla gitsin
+        sinceHeartbeat = 0
         SendHeartbeat()
     end
 

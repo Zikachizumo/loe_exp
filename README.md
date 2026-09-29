@@ -64,11 +64,14 @@ loe_exp/
 | `Config.ExpIntervalMinutes` | `60` | EXP verme süresi (aktif dakika) |
 | `Config.AutoSaveMinutes` | `5` | Biriken aktif sürenin toplu kayıt aralığı |
 | `Config.AutoCreateTables` | `true` | Tabloları açılışta otomatik oluştur |
+| `Config.DatabaseTimeout` | `30` | Veritabanı çağrısı zaman aşımı (sn) |
 | `Config.Metadata` | açık, `level` / `exp` | Qbox metadata'sına yazılacak anahtarlar |
 | `Config.Afk.TimeoutMinutes` | `10` | AFK kontrol süresi |
 | `Config.Afk.HeartbeatSeconds` | `30` | İstemcinin aktivite bildirme aralığı |
 | `Config.Afk.ServerCheck.StillMinutes` | `10` | Sunucunun hiç hareket görmediği bu süreden sonra oyuncu AFK sayılır |
-| `Config.Notify.*` | | ox_lib bildirim başlığı, süresi, konumu ve bildirim türleri |
+| `Config.Afk.CountNuiCursor` | `true` | Telefon / envanter gibi ekranlarda imleç hareketi aktivite sayılır |
+| `Config.Afk.PassengerCamera` | `false` | Araç yolcusunda kamera hareketi aktivite sayılsın mı |
+| `Config.Notify.*` | | ox_lib bildirim başlığı, süresi ve bildirim türleri. `Position = nil` iken oyuncunun ox_lib ayarındaki konum kullanılır |
 | `Config.AdminGroup` | `'group.admin'` | Yetkili komutlarının kısıtlandığı grup |
 | `Config.Commands.*` | | Komut adları (`false` ile kapatılır) |
 | `Config.Logging.ExportChanges` | `false` | Export / event değişikliklerini de logla |
@@ -97,7 +100,9 @@ Gereksinim her seviyede ~1,8 EXP artar, iki katına çıkmaz.
 | 59 → 60 | 105 | | 90 | 7.071 | ~294,6 gün |
 | 99 → 100 | 177 | | **100** | **8.760** | **365 gün** |
 
-Seviye her zaman **toplam EXP'den döngüyle** hesaplanır. Tek seferde birkaç seviyeye yetecek EXP gelirse döngü her seviyeyi sırayla atlar ve oyuncuya yalnızca ulaşılan son seviye bildirilir (`Tebrikler! 50. seviyeye ulaştın.`). 100. seviyede EXP ve aktif süre sayacı durur.
+Seviye her zaman **toplam EXP'den döngüyle** hesaplanır. Tek seferde birkaç seviyeye yetecek EXP gelirse döngü her seviyeyi sırayla atlar ve oyuncuya yalnızca ulaşılan son seviye bildirilir (`Tebrikler! 50. seviyeye ulaştın.`). Diğer sistemler için ise her seviyede ayrı `loe_exp:onLevelReached` olayı tetiklenir. 100. seviyede EXP ve aktif süre sayacı durur.
+
+> `Config.MaxLevel` sonradan düşürülürse veri **silinmez**: oyuncunun toplam EXP'si ve biriken süresi veritabanında korunur, yalnızca maksimum seviyede görünür. Ayar geri alınınca gerçek seviyesine döner.
 
 ## Aktif süre ve AFK kontrolü
 
@@ -106,9 +111,12 @@ Karar her zaman **sunucudadır**. İstemci yalnızca "son aktiviteden bu yana ge
 **İstemci** saniyede bir, tek bir hafif döngüyle şunlara bakar:
 
 - kamera dönüşü (GTA'nın otomatik boşta kamerası hariç),
-- karakterin yer değiştirmesi (araçta yalnızca sürücü; AFK yolcu sayılmaz),
+- karakterin yer değiştirmesi (araçta yalnızca sürücü),
 - sesli konuşma,
+- telefon / envanter gibi ekranlarda imleç hareketi,
 - temel kontrol tuşları.
+
+Araç yolcusunda kamera ve konum sayılmaz: araç dönerken takip kamerası kendiliğinden döndüğü için AFK yolcu aktif görünebilirdi. Yolcunun konuşması, tuşları ve imleci yine sayılır (`Config.Afk.PassengerCamera` ile değiştirilebilir).
 
 Her 30 saniyede bir sunucuya bildirim gönderir.
 
@@ -127,6 +135,8 @@ Her 30 saniyede bir sunucuya bildirim gönderir.
 | EXP / seviye değişimi | Anında kaydedilir ve Qbox metadata'sı güncellenir |
 | Biriken aktif süre | 5 dakikada bir, değişen tüm oyuncular **tek transaction** ile kaydedilir |
 | Oyundan çıkış | Anında kaydedilir. Başarısız olursa veri bellekte tutulur ve tekrar denenir. |
+| Veritabanı kesintisi | Her çağrı `Config.DatabaseTimeout` ile sınırlıdır; oxmysql cevap vermese bile kayıt kilitlenmez, bağlantı dönünce veri yazılır |
+| Toplu kayıt reddedilirse | Oyuncular tek tek kaydedilir; tek bir bozuk satır diğer oyuncuları engellemez |
 | Karakter değiştirme | `QBCore:Server:OnPlayerUnload` ile oturum kapatılır ve kaydedilir |
 | Resource durdurma / txAdmin kapanışı | Tüm oyuncular kaydedilir |
 | Resource / sunucu açılışı | İçerideki oyuncular yeniden yüklenir, kalan aktif süre kaldığı yerden devam eder |
@@ -134,6 +144,7 @@ Her 30 saniyede bir sunucuya bildirim gönderir.
 - Ani çökmede en fazla son 5 dakikalık **aktif süre** kaybolabilir. Kazanılmış **EXP kaybolmaz**.
 - Veritabanına her saniye sorgu gönderilmez.
 - Yüklemede veritabanı hatası olursa oyuncuya sıfır veriyle oturum açılmaz, gerçek veri korunur ve yükleme kendiliğinden yeniden denenir.
+- Metin alanları (isim, not) sütun uzunluğuna göre kırpılır; STRICT modda uzun bir isim kaydı reddettirmez.
 
 ## Komutlar
 
@@ -148,6 +159,7 @@ Her 30 saniyede bir sunucuya bildirim gönderir.
 - Komutlar sunucu konsolundan da kullanılabilir (ör. `expekle 12 50`).
 - Miktar tam sayı olmalı ve en fazla 8.760 olabilir. Ondalıklı, negatif veya metin girdi reddedilir.
 - **Tüm yetkili işlemleri `loe_exp_logs` tablosuna yazılır:** işlemi yapan (lisans + karakter adı), hedef karakter (citizenid + ad), miktar, eski/yeni seviye ve eski/yeni EXP.
+- İşlem sınıra (0 veya maksimum EXP) takılırsa yetkiliye **gerçekte uygulanan** miktar gösterilir, ör. `10 EXP eklendi (istenen: 500 EXP, sınır nedeniyle 10 EXP uygulandı)`. Logdaki `amount` gerçekte değişen miktardır (işaretli: `+` ekleme, `-` çıkarma), istenen miktar farklıysa `note` alanına yazılır.
 
 ## Geliştirici API'si
 
@@ -182,7 +194,7 @@ local ok, level = exports.loe_exp:RecalculateLevel(source)
 -- hata kodları: 'not_loaded' | 'invalid_amount' | 'max_level' | 'no_exp'
 
 exports.loe_exp:IsPlayerAfk(source)
-exports.loe_exp:GetRequiredXP(level)
+exports.loe_exp:GetRequiredXP(level)            -- geçersiz seviyede nil
 exports.loe_exp:GetTotalExpForLevel(level)
 exports.loe_exp:GetMaxLevel()
 ```
@@ -213,7 +225,12 @@ TriggerEvent('loe_exp:server:recalculateLevel', source, function(ok, level, tota
 -- AddEventHandler kullanın, RegisterNetEvent KULLANMAYIN (istemciler taklit edebilir)
 AddEventHandler('loe_exp:onPlayerLoaded', function(source, data) end)
 AddEventHandler('loe_exp:onExpChanged', function(source, totalExp, delta, reason) end)
-AddEventHandler('loe_exp:onLevelChanged', function(source, newLevel, oldLevel) end)
+AddEventHandler('loe_exp:onLevelChanged', function(source, newLevel, oldLevel) end) -- değişim başına bir kez
+
+-- Ulaşılan HER seviye için ayrı tetiklenir (1 -> 10 çıkan oyuncu için 2, 3, ..., 10).
+-- Seviye ödülleri için bunu kullanın. EXP düşüp aynı seviyeye yeniden ulaşılırsa tekrar tetiklenir;
+-- ödülü bir kez vermek için verildiğini kendi sisteminizde işaretleyin.
+AddEventHandler('loe_exp:onLevelReached', function(source, level) end)
 ```
 
 `reason`: `'playtime'`, `'admin:add'`, `'admin:remove'`, `'admin:set'`, `'recalculate'` veya çağrıda verilen metin.
@@ -266,7 +283,7 @@ SELECT * FROM loe_exp_logs ORDER BY id DESC LIMIT 50;
 
 ## Testler
 
-Sunucu kodu, FiveM + oxmysql + Qbox + ox_lib'i taklit eden bir ortamda Lua 5.4 ile uçtan uca test edilir:
+Sunucu ve istemci kodu, FiveM + oxmysql + Qbox + ox_lib'i taklit eden bir ortamda Lua 5.4 ile uçtan uca test edilir. Veritabanı taklidi STRICT sütun uzunluklarını, transaction geri almayı, gecikmeyi ve oxmysql'in bağlantı yokken cevap vermemesini canlandırır:
 
 ```bash
 lua5.4 tests/run_tests.lua

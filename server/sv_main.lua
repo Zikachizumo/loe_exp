@@ -97,20 +97,19 @@ local function NewSession(identifier, row)
     }
 end
 
---- Değerleri sınırlar ve seviyeyi toplam EXP'den yeniden hesaplar.
+--- Geçersiz değerleri düzeltir ve seviyeyi toplam EXP'den yeniden hesaplar.
+--- Veri SİLMEZ: Config.MaxLevel sonradan düşürülse bile toplam EXP ve biriken süre korunur,
+--- oyuncu yalnızca maksimum seviyede görünür. Ayar geri alınınca eski seviyesine döner.
 ---@return boolean changed
 local function Normalize(session)
-    local maxTotal = LoeLevel.GetMaxTotalExp()
     local total = session.totalExp
     if total ~= total or total < 0 then
         total = 0
-    elseif total > maxTotal then
-        total = maxTotal
     end
 
     local level = LoeLevel.CalculateLevel(total)
     local active = session.activeSeconds
-    if active ~= active or active < 0 or level >= MAX_LEVEL then
+    if active ~= active or active < 0 then
         active = 0
     end
 
@@ -166,15 +165,22 @@ end
 ------------------------------------------------------------------------
 
 --- Kayıt tamamlandığında çağrılır. Kayıt sürerken veri değiştiyse (version farklı) dirty kalır.
-local function FinishSave(session, version, ok)
+---@param reason? 'timeout'|'error'
+local function FinishSave(session, version, ok, reason)
     session.saving = false
 
     if ok then
-        if session.version == version then
+        if session.resaveAfterTimeout then
+            -- Zaman aşımına uğrayan eski kayıt geç de olsa yazılmış olabilir; güncel veriyi bir kez daha yaz
+            session.resaveAfterTimeout = false
+        elseif session.version == version then
             session.dirty = false
         end
     else
-        print(('^1[loe_exp] %s için kayıt başarısız, bir sonraki otomatik kayıtta tekrar denenecek.^0'):format(session.identifier))
+        if reason == 'timeout' then
+            session.resaveAfterTimeout = true
+        end
+        Debug('%s için kayıt başarısız (%s), otomatik kayıtta tekrar denenecek', session.identifier, tostring(reason))
     end
 
     -- Oyundan çıkmış oyuncunun son kaydı onaylandıysa bellekten temizle
@@ -200,8 +206,8 @@ function LoeExp.SaveSession(session)
     local snapshot = Snapshot(session)
 
     CreateThread(function()
-        local ok = LoeExpDB.SavePlayersAwait({ snapshot })
-        FinishSave(session, version, ok)
+        local ok, reason = LoeExpDB.SavePlayersAwait({ snapshot })
+        FinishSave(session, version, ok, reason)
     end)
 end
 
@@ -225,13 +231,29 @@ function LoeExp.SaveDirtySessions()
         return 0
     end
 
-    local ok = LoeExpDB.SavePlayersAwait(snapshots)
-    for i = 1, #entries do
-        FinishSave(entries[i].session, entries[i].version, ok)
+    local ok, reason = LoeExpDB.SavePlayersAwait(snapshots)
+
+    if not ok and reason == 'error' and #snapshots > 1 then
+        -- Toplu kayıt reddedildi: tek bir bozuk satır diğer oyuncuların kaydını engellemesin
+        -- diye her oyuncu ayrı ayrı kaydedilir. (Zaman aşımında denenmez, veritabanı zaten yanıt vermiyor.)
+        local saved = 0
+        for i = 1, #entries do
+            local okOne, reasonOne = LoeExpDB.SavePlayersAwait({ snapshots[i] })
+            FinishSave(entries[i].session, entries[i].version, okOne, reasonOne)
+            if okOne then
+                saved = saved + 1
+            end
+        end
+        print(('^3[loe_exp] Toplu kayıt reddedildi, oyuncular tek tek kaydedildi: %d/%d başarılı.^0'):format(saved, #snapshots))
+        return saved
     end
 
-    Debug('Otomatik kayıt: %d oyuncu (%s)', #snapshots, ok and 'başarılı' or 'BAŞARISIZ')
-    return #snapshots
+    for i = 1, #entries do
+        FinishSave(entries[i].session, entries[i].version, ok, reason)
+    end
+
+    Debug('Otomatik kayıt: %d oyuncu (%s)', #snapshots, ok and 'başarılı' or tostring(reason))
+    return ok and #snapshots or 0
 end
 
 --- Kapanışta tüm oturumları beklemeden kaydeder.
@@ -251,20 +273,23 @@ end
 --- istemciyi günceller, bildirim ve olayları tetikler.
 ---@return number delta
 local function ChangeTotalExp(session, newTotal, reason)
+    local oldTotal, oldLevel = session.totalExp, session.level
+
+    -- Maksimum toplam EXP yalnızca ARTIŞI sınırlar. MaxLevel sonradan düşürüldüyse
+    -- oyuncunun mevcut fazlası, çıkarma / yeniden hesaplama gibi işlemlerde silinmez.
     local maxTotal = LoeLevel.GetMaxTotalExp()
     if newTotal < 0 then
         newTotal = 0
-    elseif newTotal > maxTotal then
-        newTotal = maxTotal
+    elseif newTotal > maxTotal and newTotal > oldTotal then
+        newTotal = math.max(maxTotal, oldTotal)
     end
 
-    local oldTotal, oldLevel = session.totalExp, session.level
     local newLevel = LoeLevel.CalculateLevel(newTotal)
 
     session.totalExp = newTotal
     session.level = newLevel
-    if newLevel >= MAX_LEVEL then
-        -- Maksimum seviyede aktif süre sayacı durur
+    if newLevel >= MAX_LEVEL and oldLevel < MAX_LEVEL then
+        -- Maksimum seviyeye ulaşıldı: aktif süre sayacı durur
         session.activeSeconds = 0
     end
     MarkDirty(session)
@@ -272,7 +297,7 @@ local function ChangeTotalExp(session, newTotal, reason)
     -- EXP / seviye değişiklikleri seyrek olduğundan otomatik kaydı beklemeden hemen yazılır
     LoeExp.SaveSession(session)
     LoeExp.Sync(session)
-    LoeQbox.SyncMetadata(session.source, newLevel, newTotal)
+    LoeQbox.SyncMetadata(session)
 
     local delta = newTotal - oldTotal
 
@@ -290,7 +315,7 @@ local function ChangeTotalExp(session, newTotal, reason)
         end
     elseif delta > 0 and reason == 'playtime' and Config.Notify.ExpGain then
         local _, current, required = LoeLevel.GetProgress(newTotal)
-        NotifyPlayer(session, L.exp_gain:format(delta, newLevel, current, required), 'inform')
+        NotifyPlayer(session, L.exp_gain:format(delta, newLevel, current, required), 'info')
     end
 
     -- Diğer LOE sistemleri için sunucu içi olaylar (istemci tetikleyemez)
@@ -299,6 +324,11 @@ local function ChangeTotalExp(session, newTotal, reason)
     end
     if newLevel ~= oldLevel then
         TriggerEvent('loe_exp:onLevelChanged', session.source, newLevel, oldLevel)
+    end
+    -- Her ulaşılan seviye için ayrı olay: tek seferde 1 -> 10 çıkan oyuncu için 2..10 sırayla tetiklenir.
+    -- Seviye ödülü veren sistemler ara seviyeleri kaçırmaz.
+    for level = oldLevel + 1, newLevel do
+        TriggerEvent('loe_exp:onLevelReached', session.source, level)
     end
 
     Debug('%s: EXP %d -> %d, seviye %d -> %d (%s)', session.identifier, oldTotal, newTotal, oldLevel, newLevel, tostring(reason))
@@ -316,7 +346,7 @@ function LoeExp.CreditActiveTime(session, seconds)
     session.totalActiveSeconds = session.totalActiveSeconds + seconds
 
     if session.level >= MAX_LEVEL then
-        session.activeSeconds = 0
+        -- Maksimum seviyede sayaç ilerlemez (mevcut değer korunur; MaxLevel sonradan artırılırsa kaybolmaz)
         MarkDirty(session)
         return
     end
@@ -442,7 +472,7 @@ function LoeExp.HandleActivity(session, idleSeconds, now)
     local afkMinutes = (activityAt - (afkSince or anchor)) // 60
     Debug('%s AFK dönüşü, %d dk sayılmadı', session.identifier, afkMinutes)
     if Config.Notify.AfkReturn and afkMinutes >= 1 and session.level < MAX_LEVEL then
-        NotifyPlayer(session, L.afk_return:format(afkMinutes), 'inform')
+        NotifyPlayer(session, L.afk_return:format(afkMinutes), 'info')
     end
 end
 
@@ -484,12 +514,13 @@ function LoeExp.LoadPlayer(source)
         return false
     end
 
-    local identifier = LoeQbox.GetCitizenId(src)
-    if not identifier then
+    -- Qbox oyuncu nesnesi yükleme başına bir kez alınır (export çağrısı nesneyi kopyalar)
+    local character = LoeQbox.GetCharacter(src)
+    if not character then
         Debug('citizenid bulunamadı (karakter yüklü değil): %d', src)
         return false
     end
-    local name = LoeQbox.GetName(src)
+    local identifier, name = character.citizenid, character.name
 
     local session = TakeInMemorySession(identifier, src)
 
@@ -520,6 +551,8 @@ function LoeExp.LoadPlayer(source)
     session.source = src
     session.name = name
     session.offline = false
+    session.metaLevel = character.metaLevel
+    session.metaExp = character.metaExp
     ResetActivity(session, os.time())
 
     -- Veritabanındaki seviye toplam EXP ile uyuşmuyorsa düzeltilir
@@ -532,7 +565,7 @@ function LoeExp.LoadPlayer(source)
     retryAt[src] = nil
 
     LoeExp.Sync(session)
-    LoeQbox.SyncMetadata(src, session.level, session.totalExp)
+    LoeQbox.SyncMetadata(session)
     TriggerEvent('loe_exp:onPlayerLoaded', src, LoeExp.BuildPublicData(session))
     Debug('Yüklendi: %s (%d) seviye %d, %d EXP, %d sn aktif', identifier, src, session.level, session.totalExp, session.activeSeconds)
     return true
