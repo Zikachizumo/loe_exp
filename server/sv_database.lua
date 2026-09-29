@@ -1,5 +1,5 @@
 --[[
-    LOE - loe_exp | Veritabanı katmanı (oxmysql)
+    loe_exp / server / database (oxmysql)
 
     - Tüm sorgular parametrelidir (?), kullanıcı verisi asla sorgu metnine eklenmez.
     - Kayıtlar toplu (tek transaction) yapılır; her saniye sorgu gönderilmez.

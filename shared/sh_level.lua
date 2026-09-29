@@ -1,5 +1,5 @@
 --[[
-    LOE - loe_exp | Seviye hesaplamaları (shared)
+    loe_exp / shared / level
 
     Seviye, toplam EXP'den türetilir. Veritabanındaki seviye sütunu yalnızca sorgu kolaylığı içindir;
     doğruluk kaynağı her zaman toplam EXP'dir.

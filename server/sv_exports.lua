@@ -1,5 +1,6 @@
 --[[
-    LOE - loe_exp | Diğer LOE sistemleri için sunucu API'si
+    loe_exp / server / exports
+    Diğer LOE sistemleri için sunucu API'si.
 
     EXPORT'LAR (önerilen kullanım):
         exports.loe_exp:GetLevel(source)                     -> number|nil
@@ -9,7 +10,6 @@
         exports.loe_exp:RemoveExp(source, amount, reason?)   -> ok, levelOrError, totalExp
         exports.loe_exp:SetExp(source, totalExp, reason?)    -> ok, levelOrError, totalExp
         exports.loe_exp:RecalculateLevel(source)             -> ok, levelOrError, totalExp
-        exports.loe_exp:SetPlayerAfk(source, isAfk)          -> boolean   (Provider = 'external' için)
         exports.loe_exp:IsPlayerAfk(source)                  -> boolean|nil
         exports.loe_exp:GetRequiredXP(level)                 -> number
         exports.loe_exp:GetTotalExpForLevel(level)           -> number
@@ -44,7 +44,6 @@ local function LogExternalChange(action, source, amount, before, reason)
     LoeExpLog.Write({
         action = 'export_' .. action,
         invoker = GetInvokingResource() or GetCurrentResourceName(),
-        targetSource = source,
         session = session,
         amount = amount,
         oldLevel = before.level,
@@ -97,7 +96,6 @@ exports('AddExp', AddExp)
 exports('RemoveExp', RemoveExp)
 exports('SetExp', SetExp)
 exports('RecalculateLevel', LoeExp.RecalculateLevel)
-exports('SetPlayerAfk', LoeExp.SetPlayerAfk)
 exports('IsPlayerAfk', LoeExp.IsPlayerAfk)
 exports('GetRequiredXP', LoeLevel.GetRequiredXP)
 exports('GetTotalExpForLevel', LoeLevel.GetTotalExpForLevel)

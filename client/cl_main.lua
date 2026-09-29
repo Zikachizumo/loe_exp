@@ -1,21 +1,20 @@
 --[[
-    LOE - loe_exp | İstemci
-
+    loe_exp / client
     İstemcinin tek görevi oyuncunun aktif olup olmadığını gözlemlemek ve sunucuya
     "son aktiviteden bu yana geçen saniye" bilgisini göndermektir.
-    İstemci EXP, seviye veya süre BELİRLEYEMEZ. Bu karar sunucudadır.
+    İstemci EXP, seviye veya süre BELİRLEYEMEZ; karar sunucudadır.
 
     Aktivite sayılanlar: kamera hareketi, karakterin yer değiştirmesi (araç yolcusu hariç),
     sesli konuşma ve temel kontrol tuşları.
-    Performans: her karede değil, SampleIntervalMs aralığıyla tek bir döngüde kontrol edilir.
+    FPS dostu: her karede değil, SampleIntervalMs aralığıyla tek bir döngüde kontrol edilir.
 ]]
 
-local SAMPLE_MS = math.max(250, math.floor(tonumber(Config.Afk.SampleIntervalMs) or 1000))
-local HEARTBEAT_MS = math.max(5, math.floor(tonumber(Config.Afk.HeartbeatSeconds) or 30)) * 1000
-local SYNC_RETRY_MS = 10000
-local TRACK_ACTIVITY = Config.Afk.Enabled == true and Config.Afk.Provider ~= 'external'
+local SAMPLE_MS        = math.max(250, math.floor(tonumber(Config.Afk.SampleIntervalMs) or 1000))
+local HEARTBEAT_MS     = math.max(5, math.floor(tonumber(Config.Afk.HeartbeatSeconds) or 30)) * 1000
+local SYNC_RETRY_MS    = 10000
+local TRACK_ACTIVITY   = Config.Afk.Enabled == true
 local CAMERA_THRESHOLD = tonumber(Config.Afk.CameraThreshold) or 1.0
-local MOVE_THRESHOLD = tonumber(Config.Afk.MoveThreshold) or 0.3
+local MOVE_THRESHOLD   = tonumber(Config.Afk.MoveThreshold) or 0.3
 
 -- Aktivite sayılan kontroller: koşma, zıplama, araca binme, ateş, nişan, ileri/geri/sağ/sol,
 -- etkileşim (E), siper, araç direksiyonu / gaz / fren, sohbet (T), bas-konuş (N)
@@ -35,9 +34,9 @@ local function AngleDiff(a, b)
     return diff > 180.0 and 360.0 - diff or diff
 end
 
---- Tek bir aktivite örneği alır.
+-- ------------------------------------------------------------------ aktivite örneği
 local function SampleActivity()
-    local ped = PlayerPedId()
+    local ped = cache.ped
 
     -- Kamera: GTA'nın otomatik boşta kamerası dönerken kamera hareketi aktivite sayılmaz
     local idleCam = IsCinematicIdleCamRendering and IsCinematicIdleCamRendering()
@@ -51,15 +50,14 @@ local function SampleActivity()
 
     -- Konum: araçta yalnızca sürücünün hareketi sayılır (AFK yolcu sayılmaz)
     local coords = GetEntityCoords(ped)
-    local vehicle = GetVehiclePedIsIn(ped, false)
-    local canMove = vehicle == 0 or GetPedInVehicleSeat(vehicle, -1) == ped
+    local canMove = not cache.vehicle or cache.seat == -1
     if lastCoords and canMove and #(coords - lastCoords) >= MOVE_THRESHOLD then
         MarkActive()
     end
     lastCoords = coords
 
     -- Sesli konuşma
-    if Config.Afk.CountVoice and NetworkIsPlayerTalking(PlayerId()) then
+    if Config.Afk.CountVoice and NetworkIsPlayerTalking(cache.playerId) then
         MarkActive()
         return
     end
@@ -82,9 +80,7 @@ local function SendHeartbeat()
     TriggerServerEvent('loe_exp:server:activity', idleSeconds)
 end
 
-------------------------------------------------------------------------
--- Ana döngü (tek döngü, düşük frekans)
-------------------------------------------------------------------------
+-- ------------------------------------------------------------------ ana döngü
 CreateThread(function()
     local sinceHeartbeat = 0
     local sinceSyncRequest = SYNC_RETRY_MS
@@ -101,10 +97,10 @@ CreateThread(function()
                 SendHeartbeat()
             end
         else
-            -- Veri henüz gelmediyse (geç yükleme / resource yeniden başlatma) belirli aralıkla iste
+            -- Karakter yüklü ama veri gelmediyse (resource yeniden başlatma vb.) belirli aralıkla iste
             Wait(1000)
             sinceSyncRequest = sinceSyncRequest + 1000
-            if sinceSyncRequest >= SYNC_RETRY_MS and NetworkIsPlayerActive(PlayerId()) then
+            if sinceSyncRequest >= SYNC_RETRY_MS and LocalPlayer.state.isLoggedIn then
                 sinceSyncRequest = 0
                 TriggerServerEvent('loe_exp:server:requestSync')
             end
@@ -112,9 +108,7 @@ CreateThread(function()
     end
 end)
 
-------------------------------------------------------------------------
--- Sunucudan gelen olaylar
-------------------------------------------------------------------------
+-- ------------------------------------------------------------------ sunucu olayları
 
 -- Seviye verisi (yalnızca gösterim amaçlı; sunucu bu veriye asla güvenmez)
 RegisterNetEvent('loe_exp:client:sync', function(data)
@@ -136,53 +130,17 @@ RegisterNetEvent('loe_exp:client:sync', function(data)
     TriggerEvent('loe_exp:client:onDataUpdated', data)
 end)
 
--- Karakterden çıkıldı (multichar): aktivite bildirimi durur
+-- Karakterden çıkıldı: aktivite bildirimi durur
 RegisterNetEvent('loe_exp:client:unloaded', function()
     isLoaded = false
     playerData = nil
 end)
 
--- GTA yerleşik bildirimi (Config.Notify.System = 'native' veya yedek)
-RegisterNetEvent('loe_exp:client:notify', function(message)
-    if type(message) ~= 'string' then
-        return
-    end
-    BeginTextCommandThefeedPost('STRING')
-    AddTextComponentSubstringPlayerName(message)
-    EndTextCommandThefeedPostTicker(false, true)
-end)
-
-------------------------------------------------------------------------
--- İstemci export'ları (salt okunur, yalnızca gösterim için)
-------------------------------------------------------------------------
+-- ------------------------------------------------------------------ exports (salt okunur)
 exports('GetLevel', function()
     return playerData and playerData.level or nil
 end)
 
 exports('GetData', function()
     return playerData
-end)
-
-------------------------------------------------------------------------
--- Sohbet komut önerileri
-------------------------------------------------------------------------
-CreateThread(function()
-    local commands = Config.Commands
-    local idParam = { name = 'id', help = 'Oyuncu ID' }
-
-    if commands.Self then
-        TriggerEvent('chat:addSuggestion', '/' .. commands.Self, 'Seviye ve EXP bilgini gösterir')
-    end
-    if commands.View then
-        TriggerEvent('chat:addSuggestion', '/' .. commands.View, 'Oyuncunun seviyesini gösterir (Yetkili)', { idParam })
-    end
-    if commands.Add then
-        TriggerEvent('chat:addSuggestion', '/' .. commands.Add, 'Oyuncuya EXP ekler (Yetkili)', { idParam, { name = 'miktar', help = 'Eklenecek EXP' } })
-    end
-    if commands.Remove then
-        TriggerEvent('chat:addSuggestion', '/' .. commands.Remove, 'Oyuncudan EXP çıkarır (Yetkili)', { idParam, { name = 'miktar', help = 'Çıkarılacak EXP' } })
-    end
-    if commands.Set then
-        TriggerEvent('chat:addSuggestion', '/' .. commands.Set, 'Oyuncunun toplam EXP miktarını ayarlar (Yetkili)', { idParam, { name = 'miktar', help = 'Yeni toplam EXP' } })
-    end
 end)

@@ -2,7 +2,8 @@
     LOE - loe_exp | Test ortamı
 
     FiveM sunucu native'lerini, olay sistemini, iş parçacıklarını (CreateThread / Wait),
-    sahte saati (os.time) ve oxmysql'i taklit eder. Böylece sunucu kodu FiveM olmadan,
+    sahte saati (os.time), oxmysql'i, Qbox'ı (exports.qbx_core, oyuncu olayları, metadata)
+    ve ox_lib'i (lib.addCommand, ox_lib:notify) taklit eder. Böylece sunucu kodu FiveM olmadan,
     düz Lua 5.4 ile uçtan uca test edilebilir.
 
     Bu dosya fxmanifest.lua'da yer almaz, oyuna yüklenmez.
@@ -15,8 +16,7 @@ Mock.__index = Mock
 Mock.ServerFiles = {
     'config.lua',
     'shared/sh_level.lua',
-    'config_server.lua',
-    'server/sv_bridge.lua',
+    'server/sv_qbox.lua',
     'server/sv_database.lua',
     'server/sv_logs.lua',
     'server/sv_main.lua',
@@ -53,11 +53,10 @@ function Mock.new(opts)
     self.players = {}
     self.db = opts.db or Mock.NewDatabase()
     self.dbFail = false
-    self.webhooks = {}
     self.logs = {}
     self.invoker = nil
     self.oneSync = true
-    self.resourceStates = opts.resourceStates or { oxmysql = 'started' }
+    self.resourceStates = opts.resourceStates or { oxmysql = 'started', ox_lib = 'started', qbx_core = 'started' }
     self:InstallGlobals()
     return self
 end
@@ -132,12 +131,33 @@ function Mock:ClientEvent(src, name, ...)
     return true
 end
 
+--- ox_lib lib.addCommand davranışı: restricted grup kontrolü (FiveM ACE) ve parametre eşleme.
+---@return boolean çalıştırıldı mı
 function Mock:Command(src, name, args)
     local command = self.commands[name]
     assert(command, 'komut yok: ' .. name)
+    local properties = command.properties or {}
+
+    if properties.restricted and src ~= 0 then
+        local player = self.players[src]
+        if not (player and player.groups[properties.restricted]) then
+            return false
+        end
+    end
+
+    args = args or {}
+    local parsed = {}
+    for i, param in ipairs(properties.params or {}) do
+        if args[i] == nil and not param.optional then
+            return false
+        end
+        parsed[param.name] = args[i]
+    end
+
     self:Spawn(function()
-        command(src, args or {}, name)
+        command.handler(src, parsed, name)
     end)
+    return true
 end
 
 function Mock:Export(name, ...)
@@ -156,11 +176,11 @@ function Mock:ClientEventsFor(src, name)
     return out
 end
 
---- Oyuncuya giden bildirim metinleri (native bildirim sistemi)
+--- Oyuncuya giden ox_lib bildirim metinleri
 function Mock:Notifications(src)
     local out = {}
-    for _, event in ipairs(self:ClientEventsFor(src, 'loe_exp:client:notify')) do
-        out[#out + 1] = event.args[1]
+    for _, event in ipairs(self:ClientEventsFor(src, 'ox_lib:notify')) do
+        out[#out + 1] = event.args[1].description
     end
     return out
 end
@@ -168,16 +188,60 @@ end
 ------------------------------------------------------------------------
 -- Oyuncu yardımcıları
 ------------------------------------------------------------------------
+--- Qbox oyuncu nesnesi (exports.qbx_core:GetPlayer). Karakter seçilmemişse nil.
+function Mock:QbxPlayer(src)
+    local player = self.players[tonumber(src)]
+    if not player or not player.loggedIn then
+        return nil
+    end
+    return {
+        PlayerData = {
+            source = tonumber(src),
+            citizenid = player.citizenid,
+            charinfo = { firstname = player.firstname, lastname = player.lastname },
+            metadata = player.metadata,
+        },
+        Functions = {
+            SetMetaData = function(key, value)
+                player.metadata[key] = value
+                player.metaWrites = player.metaWrites + 1
+            end,
+        },
+    }
+end
+
+--- Oyuncu bağlanır ve karakterini seçer (QBCore:Server:PlayerLoaded).
 function Mock:AddPlayer(src, opts)
     opts = opts or {}
     self.players[src] = {
         name = opts.name or ('Oyuncu' .. src),
         license = opts.license or ('license:' .. src),
-        aces = opts.aces or {},
+        groups = opts.groups or {},
         coords = { x = 0.0, y = 0.0, z = 0.0 },
         heading = 0.0,
+        loggedIn = false,
+        metadata = {},
+        metaWrites = 0,
     }
-    self:Dispatch('playerJoining', src, 'temp:' .. src)
+    self:Login(src, opts)
+end
+
+--- Karakter seçimi (multichar).
+function Mock:Login(src, opts)
+    opts = opts or {}
+    local player = self.players[src]
+    player.citizenid = opts.citizenid or ('CID' .. src)
+    player.firstname = opts.firstname or ('Oyuncu' .. src)
+    player.lastname = opts.lastname or 'Test'
+    player.metadata = {}
+    player.loggedIn = true
+    self:Dispatch('QBCore:Server:PlayerLoaded', '', self:QbxPlayer(src))
+end
+
+--- Karakterden çıkış (QBCore:Server:OnPlayerUnload).
+function Mock:Logout(src)
+    self.players[src].loggedIn = false
+    self:Dispatch('QBCore:Server:OnPlayerUnload', '', src)
 end
 
 function Mock:Drop(src)
@@ -360,11 +424,24 @@ function Mock:InstallGlobals()
     _G.TriggerClientEvent = function(name, target, ...)
         table.insert(mock.clientEvents, { name = name, target = target, args = table.pack(...) })
     end
-    _G.RegisterCommand = function(name, fn) mock.commands[name] = fn end
+    -- ox_lib
+    _G.lib = {
+        addCommand = function(name, properties, handler)
+            mock.commands[name] = { properties = properties, handler = handler }
+        end,
+    }
+
+    -- Qbox
+    local qbxExports = {
+        GetPlayer = function(_, src) return mock:QbxPlayer(src) end,
+    }
 
     _G.exports = setmetatable({}, {
         __call = function(_, name, fn) mock.exported[name] = fn end,
         __index = function(_, resource)
+            if resource == 'qbx_core' then
+                return qbxExports
+            end
             return setmetatable({}, { __index = function(_, fnName)
                 return function() error(('export yok: %s.%s'):format(resource, fnName)) end
             end })
@@ -401,10 +478,6 @@ function Mock:InstallGlobals()
         local player = mock.players[tonumber(src)]
         return player and { player.license } or {}
     end
-    _G.IsPlayerAceAllowed = function(src, ace)
-        local player = mock.players[tonumber(src)]
-        return player ~= nil and player.aces[ace] == true
-    end
     _G.GetPlayerPed = function(src)
         if not mock.oneSync or not mock.players[tonumber(src)] then return 0 end
         return tonumber(src)
@@ -413,10 +486,6 @@ function Mock:InstallGlobals()
     _G.GetEntityCoords = function(ped) return Copy(mock.players[ped].coords) end
     _G.GetEntityHeading = function(ped) return mock.players[ped].heading end
 
-    _G.PerformHttpRequest = function(url, _, method, body)
-        table.insert(mock.webhooks, { url = url, method = method, body = body })
-    end
-    _G.json = { encode = function() return '{}' end }
 
     -- Konsol çıktılarını sessize al ama sakla
     _G.print = function(...)

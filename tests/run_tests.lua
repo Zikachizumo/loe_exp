@@ -1,10 +1,11 @@
 --[[
-    LOE - loe_exp | Test paketi
+    loe_exp / tests
 
     Çalıştırma (resource klasöründe):
         lua5.4 tests/run_tests.lua
 
-    Sunucu kodu, tests/mock_fivem.lua içindeki sahte FiveM + oxmysql ortamında uçtan uca çalıştırılır.
+    Sunucu kodu, tests/mock_fivem.lua içindeki sahte FiveM + oxmysql + Qbox + ox_lib ortamında
+    uçtan uca çalıştırılır.
 ]]
 
 local realPrint = print
@@ -46,7 +47,7 @@ local function ContainsPattern(list, pattern)
     return false
 end
 
---- Hazır ortam: standalone framework, 1 numaralı oyuncu yüklenmiş ve ilk aktivite bildirimi gönderilmiş.
+--- Hazır ortam: 1 numaralı oyuncu (citizenid CID1) karakterini seçmiş ve ilk aktivite bildirimi gönderilmiş.
 local function Setup(opts)
     opts = opts or {}
     local env = Mock.new(opts)
@@ -114,8 +115,8 @@ test('60 aktif dakika = 1 EXP, Türkçe seviye bildirimi, anında kayıt', funct
     eq(env:Export('GetTotalExp', 1), 1)
     eq(env:Export('GetLevel', 1), 2)
     truthy(Contains(env:Notifications(1), 'Tebrikler! 2. seviyeye ulaştın.'), 'seviye bildirimi')
-    eq(env.db.players['license:1'].total_exp, 1, 'EXP veritabanına anında yazılmalı')
-    eq(env.db.players['license:1'].level, 2)
+    eq(env.db.players['CID1'].total_exp, 1, 'EXP veritabanına anında yazılmalı')
+    eq(env.db.players['CID1'].level, 2)
 end)
 
 test('Tam simülasyon: 8.759 aktif saatte 99, 8.760 aktif saatte 100. seviye', function()
@@ -182,10 +183,10 @@ test('Oyundan çıkıp girmek süreyi sıfırlamaz, çevrimdışı süre sayılm
     env:PlayActive(1, 45 * 60)
     env:Drop(1)
     eq(LoeExp.GetSession(1), nil)
-    eq(env.db.players['license:1'].active_seconds, 2700, 'çıkışta kaydedildi')
+    eq(env.db.players['CID1'].active_seconds, 2700, 'çıkışta kaydedildi')
 
     env:Advance(3 * 3600)
-    env:AddPlayer(2, { license = 'license:1' }) -- farklı sunucu ID ile geri döner
+    env:AddPlayer(2, { citizenid = 'CID1' }) -- aynı karakterle farklı sunucu ID ile geri döner
     env:Heartbeat(2, 0)
     local session = LoeExp.GetSession(2)
     eq(session.activeSeconds, 2700)
@@ -200,7 +201,7 @@ test('Resource yeniden başlatılınca ilerleme kaldığı yerden devam eder', f
     local env = Setup()
     env:PlayActive(1, 20 * 60)
     env:StopResource()
-    eq(env.db.players['license:1'].active_seconds, 1200, 'kapanış kaydı')
+    eq(env.db.players['CID1'].active_seconds, 1200, 'kapanış kaydı')
 
     local env2 = Mock.new({ db = env.db })
     env2.players[1] = env.players[1] -- oyuncu sunucuda kalır
@@ -218,7 +219,7 @@ end)
 test('Ani çökmede en fazla bir otomatik kayıt aralığı kadar süre kaybolur', function()
     local env = Setup()
     env:PlayActive(1, 12 * 60)
-    local saved = env.db.players['license:1'].active_seconds
+    local saved = env.db.players['CID1'].active_seconds
     truthy(saved >= 12 * 60 - 5 * 60, 'kaydedilen aktif süre: ' .. saved)
 end)
 
@@ -260,8 +261,8 @@ test('Maksimum seviyede EXP ve aktif süre sayacı durur', function()
     eq(ok, false)
     eq(err, 'max_level')
     eq(env:Export('GetPlayerData', 1).isMaxLevel, true)
-    eq(env.db.players['license:1'].level, 100)
-    eq(env.db.players['license:1'].total_exp, 8760)
+    eq(env.db.players['CID1'].level, 100)
+    eq(env.db.players['CID1'].total_exp, 8760)
 end)
 
 test('Tek seferde birden fazla seviye döngüyle hesaplanır, EXP çıkarma seviyeyi düşürür', function()
@@ -344,8 +345,8 @@ test('Sunucu taraflı hareketsizlik kontrolü sahte "aktifim" bildirimini durdur
         env:Advance(30)
         env:Heartbeat(1, 0)
     end
-    truthy(session.activeSeconds <= 20 * 60, 'sayılan: ' .. session.activeSeconds)
-    truthy(session.activeSeconds >= 19 * 60, 'sayılan: ' .. session.activeSeconds)
+    truthy(session.activeSeconds <= 10 * 60, 'sayılan: ' .. session.activeSeconds)
+    truthy(session.activeSeconds >= 9 * 60, 'sayılan: ' .. session.activeSeconds)
     eq(session.totalExp, 0)
 
     -- OneSync yoksa kontrol atlanır
@@ -366,11 +367,12 @@ end)
 ------------------------------------------------------------------------
 test('Yetkili komutları: yetki, doğrulama ve loglama', function()
     local env = Setup()
-    env:AddPlayer(2, { name = 'Yetkili', aces = { ['loe_exp.admin'] = true } })
+    env:AddPlayer(2, { firstname = 'Yetkili', lastname = 'Admin', groups = { ['group.admin'] = true } })
 
-    env:Command(1, 'expekle', { '1', '100' })
+    eq(env:Command(1, 'expekle', { '1', '100' }), false, 'group.admin olmayan komutu çalıştıramaz')
+    eq(env:Command(1, 'expayarla', { '1', '8760' }), false)
+    eq(env:Command(1, 'seviyebak', { '2' }), false)
     eq(env:Export('GetTotalExp', 1), 0, 'yetkisiz oyuncu EXP ekleyemez')
-    truthy(Contains(env:Notifications(1), 'Bu komutu kullanma yetkin yok.'))
 
     env:Command(2, 'expekle', { '1', '65' })
     eq(env:Export('GetLevel', 1), 10)
@@ -379,7 +381,7 @@ test('Yetkili komutları: yetki, doğrulama ve loglama', function()
     env:Command(2, 'expsil', { '1', '8' })
     eq(env:Export('GetTotalExp', 1), 300)
     env:Command(2, 'seviyebak', { '1' })
-    truthy(ContainsPattern(env:Notifications(2), '^%[1%] Oyuncu1 | Seviye: 19 | Toplam EXP: 300'), 'görüntüleme çıktısı')
+    truthy(ContainsPattern(env:Notifications(2), '^%[1%] Oyuncu1 Test | Seviye: 19 | Toplam EXP: 300'), 'görüntüleme çıktısı')
 
     for _, args in ipairs({ { '1', '12.5' }, { '1', '-3' }, { '1', 'abc' }, { '1', '99999' }, { '99', '10' }, {} }) do
         env:Command(2, 'expekle', args)
@@ -396,8 +398,9 @@ test('Yetkili komutları: yetki, doğrulama ve loglama', function()
     eq(table.concat(actions, ','), 'add,set,remove,view,add')
     local first = env.db.logs[1]
     eq(first.actor_identifier, 'license:2')
-    eq(first.actor_name, 'Yetkili')
-    eq(first.target_identifier, 'license:1')
+    eq(first.actor_name, 'Yetkili Admin')
+    eq(first.target_identifier, 'CID1')
+    eq(first.target_name, 'Oyuncu1 Test')
     eq(first.amount, 65)
     eq(first.old_level, 1)
     eq(first.new_level, 10)
@@ -411,19 +414,6 @@ test('/seviyem oyuncuya kendi ilerlemesini gösterir', function()
     env:Command(1, 'seviyem', {})
     local notes = env:Notifications(1)
     eq(notes[#notes], 'Seviye: 10 | Toplam EXP: 70 | Sonraki seviye: 5/16 EXP | Sonraki EXP: 25/60 aktif dk')
-end)
-
-test('Discord webhook yalnızca ayarlandığında gönderilir', function()
-    local env = Setup({ configure = function(c) c.DiscordWebhook = '' end })
-    env:Command(0, 'expekle', { '1', '1' })
-    eq(#env.webhooks, 0)
-
-    local env2 = Mock.new()
-    env2:Boot()
-    Config.DiscordWebhook = 'https://discord.example/webhook'
-    env2:AddPlayer(1)
-    env2:Command(0, 'expekle', { '1', '1' })
-    eq(#env2.webhooks, 1)
 end)
 
 ------------------------------------------------------------------------
@@ -493,17 +483,6 @@ test('Export değişiklikleri istenirse çağıran resource adıyla loglanır', 
     eq(log.note, 'görev ödülü')
 end)
 
-test('Harici AFK sağlayıcısı (LOE AFK sistemi) desteklenir', function()
-    local env = Setup({ configure = function(c) c.Afk.Provider = 'external' end })
-    local session = LoeExp.GetSession(1)
-    env:Export('SetPlayerAfk', 1, true)
-    env:PlayActive(1, 600)
-    eq(session.activeSeconds, 0)
-    env:Export('SetPlayerAfk', 1, false)
-    env:PlayActive(1, 600)
-    truthy(session.activeSeconds >= 570 and session.activeSeconds <= 600, 'sayılan: ' .. session.activeSeconds)
-end)
-
 ------------------------------------------------------------------------
 -- Veritabanı dayanıklılığı
 ------------------------------------------------------------------------
@@ -515,21 +494,21 @@ end)
 
 test('Veritabanındaki tutarsız seviye yüklemede düzeltilir', function()
     local db = Mock.NewDatabase()
-    db.players['license:1'] = {
-        identifier = 'license:1', level = 50, total_exp = 65, active_seconds = 100,
+    db.players['CID1'] = {
+        identifier = 'CID1', level = 50, total_exp = 65, active_seconds = 100,
         total_active_seconds = 0, last_name = '',
     }
     local env = Mock.new({ db = db })
     env:Boot()
     env:AddPlayer(1)
     eq(env:Export('GetLevel', 1), 10)
-    eq(db.players['license:1'].level, 10, 'düzeltilmiş seviye kaydedildi')
+    eq(db.players['CID1'].level, 10, 'düzeltilmiş seviye kaydedildi')
 end)
 
 test('Yüklemede veritabanı hatası: veri sıfırlanmaz, sonra yeniden denenir', function()
     local db = Mock.NewDatabase()
-    db.players['license:1'] = {
-        identifier = 'license:1', level = 10, total_exp = 65, active_seconds = 1000,
+    db.players['CID1'] = {
+        identifier = 'CID1', level = 10, total_exp = 65, active_seconds = 1000,
         total_active_seconds = 500000, last_name = 'X',
     }
     local env = Mock.new({ db = db })
@@ -538,7 +517,7 @@ test('Yüklemede veritabanı hatası: veri sıfırlanmaz, sonra yeniden denenir'
     env:AddPlayer(1)
     eq(LoeExp.GetSession(1), nil, 'hatalı yüklemede oturum açılmaz')
     env.dbFail = false
-    eq(db.players['license:1'].total_exp, 65, 'mevcut veri korunmalı')
+    eq(db.players['CID1'].total_exp, 65, 'mevcut veri korunmalı')
 
     env:Advance(10)
     env:ClientEvent(1, 'loe_exp:server:requestSync')
@@ -554,9 +533,9 @@ test('Çıkışta kayıt başarısızsa veri bellekte tutulur ve tekrar denenir'
     env:PlayActive(1, 30 * 60)
     env.dbFail = true
     env:Drop(1)
-    truthy(LoeExp.Pending['license:1'], 'bekleyen kayıt')
+    truthy(LoeExp.Pending['CID1'], 'bekleyen kayıt')
 
-    env:AddPlayer(3, { license = 'license:1' }) -- veritabanı hâlâ çalışmıyorken geri döner
+    env:AddPlayer(3, { citizenid = 'CID1' }) -- veritabanı hâlâ çalışmıyorken geri döner
     local session = LoeExp.GetSession(3)
     truthy(session, 'bellekteki veriyle yüklenmeli')
     eq(session.activeSeconds, 1800)
@@ -564,19 +543,65 @@ test('Çıkışta kayıt başarısızsa veri bellekte tutulur ve tekrar denenir'
     env.dbFail = false
     env:Heartbeat(3, 0)
     env:Advance(301)
-    eq(env.db.players['license:1'].active_seconds, 1800)
-    eq(LoeExp.Pending['license:1'], nil)
+    eq(env.db.players['CID1'].active_seconds, 1800)
+    eq(LoeExp.Pending['CID1'], nil)
 end)
 
-test('Karakter çıkışı (multichar) oturumu kapatır ve kaydeder', function()
+test('Qbox karakter değiştirme: oturum kaydedilir, her karakter ayrı seviyelenir', function()
     local env = Setup()
     env:PlayActive(1, 10 * 60)
-    LoeExp.UnloadPlayer(1, 'logout')
-    eq(LoeExp.GetSession(1), nil)
-    eq(env.db.players['license:1'].active_seconds, 600)
+    env:Export('AddExp', 1, 65)
+    env:Logout(1)
+    eq(LoeExp.GetSession(1), nil, 'karakterden çıkınca oturum kapanır')
+    eq(env.db.players['CID1'].active_seconds, 600)
     eq(#env:ClientEventsFor(1, 'loe_exp:client:unloaded'), 1)
-    eq(env:Heartbeat(1, 0), true, 'olay alınır ama oturum yok')
+
+    -- Karakter seçim ekranında süre yazılmaz, yükleme denenmez
+    env:Advance(30)
+    env:ClientEvent(1, 'loe_exp:server:requestSync')
     eq(LoeExp.GetSession(1), nil)
+
+    -- İkinci karakter kendi seviyesiyle başlar
+    env:Login(1, { citizenid = 'CID9' })
+    eq(env:Export('GetLevel', 1), 1)
+    eq(env:Export('GetTotalExp', 1), 0)
+
+    -- İlk karaktere dönünce ilerlemesi yerindedir
+    env:Logout(1)
+    env:Login(1, { citizenid = 'CID1' })
+    eq(env:Export('GetLevel', 1), 10)
+    eq(LoeExp.GetSession(1).activeSeconds, 600)
+end)
+
+test('Qbox metadata: seviye ve EXP metadata.level / metadata.exp alanına yazılır', function()
+    local env = Setup()
+    local player = env.players[1]
+    eq(player.metadata.level, 1, 'yüklemede yazılır')
+    eq(player.metadata.exp, 0)
+
+    env:Export('AddExp', 1, 65)
+    eq(player.metadata.level, 10)
+    eq(player.metadata.exp, 65)
+
+    -- Değişmeyen değer tekrar yazılmaz; aktif süre metadata'ya hiç yazılmaz
+    local writes = player.metaWrites
+    env:PlayActive(1, 30 * 60)
+    eq(player.metaWrites, writes, 'aktif süre metadata yazmaz')
+    env:Export('AddExp', 1, 1)
+    eq(player.metaWrites, writes + 1, 'yalnızca exp değişti')
+    eq(player.metadata.exp, 66)
+
+    local env2 = Setup({ configure = function(c) c.Metadata.Enabled = false end })
+    env2:Export('AddExp', 1, 65)
+    eq(env2.players[1].metaWrites, 0, 'kapalıyken metadata yazılmaz')
+end)
+
+test('Yetkili komutları group.admin ile kısıtlı, /seviyem herkese açık', function()
+    local env = Setup()
+    for _, name in ipairs({ 'seviyebak', 'expekle', 'expsil', 'expayarla' }) do
+        eq(env.commands[name].properties.restricted, 'group.admin', name)
+    end
+    eq(env.commands['seviyem'].properties.restricted, nil)
 end)
 
 test('fxmanifest.lua içindeki tüm dosyalar mevcut', function()
@@ -590,7 +615,7 @@ test('fxmanifest.lua içindeki tüm dosyalar mevcut', function()
         handle:close()
         count = count + 1
     end
-    eq(count, 10, 'manifest dosya sayısı')
+    eq(count, 9, 'manifest dosya sayısı')
 end)
 
 ------------------------------------------------------------------------

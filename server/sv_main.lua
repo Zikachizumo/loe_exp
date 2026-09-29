@@ -1,5 +1,5 @@
 --[[
-    LOE - loe_exp | Sunucu çekirdeği
+    loe_exp / server / main
 
     EXP, seviye ve aktif süre hesaplamalarının TAMAMI burada, sunucu tarafında yapılır.
     İstemciden gelen tek bilgi "son aktiviteden bu yana geçen saniye"dir. Bu bilgi doğrulanır,
@@ -17,8 +17,8 @@
 
 LoeExp = {
     Sessions = {},      -- [source] = oturum (çevrimiçi ve verisi yüklenmiş oyuncular)
-    ByIdentifier = {},  -- [identifier] = source
-    Pending = {},       -- [identifier] = oturum (oyundan çıkmış, son kaydı henüz onaylanmamış)
+    ByIdentifier = {},  -- [citizenid] = source
+    Pending = {},       -- [citizenid] = oturum (oyundan çıkmış, son kaydı henüz onaylanmamış)
     Ready = false,
 }
 
@@ -33,7 +33,6 @@ local EXP_PER_INTERVAL = math.max(0, math.floor(tonumber(Config.ExpPerInterval) 
 local AUTOSAVE_MS = math.max(1, tonumber(Config.AutoSaveMinutes) or 5) * 60000
 
 local AFK_ENABLED = Config.Afk.Enabled == true
-local AFK_EXTERNAL = Config.Afk.Provider == 'external'
 local AFK_TIMEOUT = math.max(60, math.floor((tonumber(Config.Afk.TimeoutMinutes) or 10) * 60))
 local HEARTBEAT_SECONDS = math.max(5, math.floor(tonumber(Config.Afk.HeartbeatSeconds) or 30))
 local HEARTBEAT_MIN_GAP = math.max(1, math.floor(HEARTBEAT_SECONDS / 2))
@@ -73,7 +72,6 @@ local function ResetActivity(session, now)
     session.lastHeartbeat = 0
     session.lastSyncRequest = 0
     session.spam = 0
-    session.externalAfk = false
     session.isAfk = false
     session.afkSince = nil
     session.lastPos = nil
@@ -159,7 +157,7 @@ end
 
 local function NotifyPlayer(session, message, notifyType)
     if Config.Notify.Enabled and session.source then
-        LoeBridge.Notify(session.source, message, notifyType)
+        LoeQbox.Notify(session.source, message, notifyType)
     end
 end
 
@@ -274,6 +272,7 @@ local function ChangeTotalExp(session, newTotal, reason)
     -- EXP / seviye değişiklikleri seyrek olduğundan otomatik kaydı beklemeden hemen yazılır
     LoeExp.SaveSession(session)
     LoeExp.Sync(session)
+    LoeQbox.SyncMetadata(session.source, newLevel, newTotal)
 
     local delta = newTotal - oldTotal
 
@@ -395,9 +394,6 @@ function LoeExp.HandleActivity(session, idleSeconds, now)
 
     if not AFK_ENABLED then
         activityAt = now
-    elseif AFK_EXTERNAL then
-        -- LOE'nin kendi AFK sistemi durumu SetPlayerAfk ile bildirir
-        activityAt = not session.externalAfk and now or nil
     else
         local idle = SanitizeIdle(idleSeconds)
         activityAt = idle and (now - idle) or nil
@@ -409,7 +405,7 @@ function LoeExp.HandleActivity(session, idleSeconds, now)
     end
 
     if not activityAt then
-        -- AFK / doğrulanamayan bildirim: bu ana kadar geçen süre sayılmaz
+        -- AFK (sunucu hareketsizlik) / doğrulanamayan bildirim: bu ana kadar geçen süre sayılmaz
         MarkAfk(session, session.anchor or now)
         session.anchor = now
         return
@@ -488,12 +484,12 @@ function LoeExp.LoadPlayer(source)
         return false
     end
 
-    local identifier = LoeBridge.GetIdentifier(src)
+    local identifier = LoeQbox.GetCitizenId(src)
     if not identifier then
-        Debug('Kimlik bulunamadı: %d', src)
+        Debug('citizenid bulunamadı (karakter yüklü değil): %d', src)
         return false
     end
-    local name = LoeBridge.GetName(src)
+    local name = LoeQbox.GetName(src)
 
     local session = TakeInMemorySession(identifier, src)
 
@@ -513,7 +509,7 @@ function LoeExp.LoadPlayer(source)
             print(('^1[loe_exp] %s (%d) verisi yüklenemedi: %s^0'):format(identifier, src, tostring(row)))
             return false
         end
-        if not GetPlayerName(src) or LoeBridge.GetIdentifier(src) ~= identifier or Sessions[src] then
+        if not GetPlayerName(src) or LoeQbox.GetCitizenId(src) ~= identifier or Sessions[src] then
             return false
         end
 
@@ -536,13 +532,14 @@ function LoeExp.LoadPlayer(source)
     retryAt[src] = nil
 
     LoeExp.Sync(session)
+    LoeQbox.SyncMetadata(src, session.level, session.totalExp)
     TriggerEvent('loe_exp:onPlayerLoaded', src, LoeExp.BuildPublicData(session))
     Debug('Yüklendi: %s (%d) seviye %d, %d EXP, %d sn aktif', identifier, src, session.level, session.totalExp, session.activeSeconds)
     return true
 end
 
 --- Oyuncunun oturumunu kapatır ve verisini kaydeder.
----@param reason 'drop'|'logout'|string
+---@param reason 'drop'|'logout'|string drop: oyundan çıkış, logout: karakter değiştirme
 function LoeExp.UnloadPlayer(source, reason)
     local src = tonumber(source)
     if not src then
@@ -649,21 +646,12 @@ function LoeExp.RecalculateLevel(source)
     return true, session.level, session.totalExp
 end
 
-function LoeExp.SetPlayerAfk(source, isAfk)
-    local session = LoeExp.GetSession(source)
-    if not session then
-        return false
-    end
-    session.externalAfk = isAfk == true
-    return true
-end
-
 function LoeExp.IsPlayerAfk(source)
     local session = LoeExp.GetSession(source)
     if not session then
         return nil
     end
-    return session.isAfk or session.externalAfk
+    return session.isAfk
 end
 
 ------------------------------------------------------------------------
@@ -715,7 +703,7 @@ RegisterNetEvent('loe_exp:server:requestSync', function()
     end
     retryAt[src] = now + SYNC_MIN_GAP
 
-    if LoeBridge.IsPlayerLoaded(src) then
+    if LoeQbox.IsPlayerLoaded(src) then
         CreateThread(function()
             LoeExp.LoadPlayer(src)
         end)
@@ -725,6 +713,21 @@ end)
 ------------------------------------------------------------------------
 -- Yaşam döngüsü
 ------------------------------------------------------------------------
+
+-- Qbox: karakter yüklendi
+AddEventHandler('QBCore:Server:PlayerLoaded', function(player)
+    local src = player and player.PlayerData and tonumber(player.PlayerData.source)
+    if src then
+        CreateThread(function()
+            LoeExp.LoadPlayer(src)
+        end)
+    end
+end)
+
+-- Qbox: karakterden çıkış (karakter değiştirme)
+AddEventHandler('QBCore:Server:OnPlayerUnload', function(src)
+    LoeExp.UnloadPlayer(src, 'logout')
+end)
 
 AddEventHandler('playerDropped', function()
     LoeExp.UnloadPlayer(source, 'drop')
@@ -744,18 +747,6 @@ AddEventHandler('txAdmin:events:serverShuttingDown', function()
 end)
 
 CreateThread(function()
-    LoeBridge.Init()
-    LoeBridge.RegisterPlayerHooks(
-        function(src)
-            CreateThread(function()
-                LoeExp.LoadPlayer(src)
-            end)
-        end,
-        function(src)
-            LoeExp.UnloadPlayer(src, 'logout')
-        end
-    )
-
     if HEARTBEAT_SECONDS >= AFK_TIMEOUT then
         print('^1[loe_exp] Config.Afk.HeartbeatSeconds, TimeoutMinutes süresinden kısa olmalı! Aktif süre sayılamaz.^0')
     end
@@ -771,14 +762,14 @@ CreateThread(function()
     -- Kaynak sunucu açıkken başlatıldıysa içerideki oyuncuları yükle
     for _, playerId in ipairs(GetPlayers()) do
         local src = tonumber(playerId)
-        if src and LoeBridge.IsPlayerLoaded(src) then
+        if src and LoeQbox.IsPlayerLoaded(src) then
             LoeExp.LoadPlayer(src)
         end
     end
 
-    print(('[loe_exp] Hazır | Framework: %s | Maks. seviye: %d (%d EXP) | %d EXP / %d aktif dk | AFK: %s'):format(
-        LoeBridge.Framework, MAX_LEVEL, LoeLevel.GetMaxTotalExp(), EXP_PER_INTERVAL, INTERVAL_SECONDS // 60,
-        AFK_ENABLED and (AFK_EXTERNAL and 'harici' or ('dahili, ' .. (AFK_TIMEOUT // 60) .. ' dk')) or 'kapalı'
+    print(('[loe_exp] Hazır | Maks. seviye: %d (%d EXP) | %d EXP / %d aktif dk | AFK: %s'):format(
+        MAX_LEVEL, LoeLevel.GetMaxTotalExp(), EXP_PER_INTERVAL, INTERVAL_SECONDS // 60,
+        AFK_ENABLED and ((AFK_TIMEOUT // 60) .. ' dk') or 'kapalı'
     ))
 
     -- Otomatik toplu kayıt

@@ -1,10 +1,10 @@
--- LOE - loe_exp | Veritabanı kurulumu
+-- loe_exp / veritabanı kurulumu (Qbox)
 -- MariaDB 10.3+ / MySQL 5.7+ ile uyumludur.
 -- Config.AutoCreateTables = true ise bu dosya sunucu açılışında otomatik çalıştırılır.
 -- Not: Bu dosyadaki yorumlarda noktalı virgül kullanmayın (otomatik kurulum ifadeleri noktalı virgülden ayırır).
 
 -- Oyuncu ilerlemesi
---   identifier            : Karakter kimliği (ESX identifier / QBCore-Qbox citizenid) veya license
+--   identifier            : Karakterin Qbox citizenid'si
 --   level                 : Seviye (toplam EXP'den hesaplanır, sorgu kolaylığı için saklanır)
 --   total_exp             : Toplam EXP (doğruluk kaynağı)
 --   active_seconds        : Bir sonraki EXP için biriken aktif süre (saniye)
